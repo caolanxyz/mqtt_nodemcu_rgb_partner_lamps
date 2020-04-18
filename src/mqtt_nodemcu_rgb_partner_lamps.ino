@@ -1,6 +1,6 @@
 /*
- * ESP8266 MQTT Lights for Home Assistant.
- * See https://github.com/corbanmailloux/esp-mqtt-rgb-led
+ * NodeMCU RGB Partner Lamps using MQTT
+ * https://github.com/CaolanMcKendry/mqtt_nodemcu_rgb_partner_lamps
  */
 
 // https://github.com/bblanchon/ArduinoJson
