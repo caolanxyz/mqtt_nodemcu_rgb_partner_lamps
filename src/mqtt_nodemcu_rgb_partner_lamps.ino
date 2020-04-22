@@ -1,6 +1,6 @@
 /*
- * NodeMCU RGB Partner Lamps using MQTT
- * https://github.com/CaolanMcKendry/mqtt_nodemcu_rgb_partner_lamps
+ * ESP8266 MQTT Lights for Home Assistant.
+ * See https://github.com/corbanmailloux/esp-mqtt-rgb-led
  */
 
 // https://github.com/bblanchon/ArduinoJson
@@ -14,18 +14,26 @@
 const char* ssid = "ssid";
 const char* password = "pass";
 
-const char* mqtt_server = "mqtt.domain.cm";
+const char* mqtt_server = "url";
 const char* mqtt_username = "";
 const char* mqtt_password = "";
 //Port not needed if you are using your own, you can change this if you are using a service like cloudmqtt
 const int mqtt_port = 1883;
 
-const char* client_id = "CLIENTID"; // Must be unique on the MQTT network
+const char* client_id = "id"; // Must be unique on the MQTT network
+
+/*
+
+IMPORTANT
+-
+REMEMBER TO SET UP YOUR TOPICS TO MATCH THE PARTNER DEVICE
+
+*/
 
 // Topics
-const char* light_state_topic = "lamp/firstlamp";
-const char* light_partner_topic = "lamp/secondlamp/set";
-const char* light_set_topic = "lamp/firstlamp/set";
+const char* light_state_topic = "bob/lamp1";
+const char* light_partner_topic = "bob/lamp2/set";
+const char* light_set_topic = "bob/lamp1/set";
 
 const int BUFFER_SIZE = JSON_OBJECT_SIZE(10);
 
@@ -42,18 +50,15 @@ int redcolour = 0;
 int greencolour = 0;
 int bluecolour = 0;
 
-// Timing Variables
-unsigned long aliveSentTimerStart;  
-unsigned long currentMillis;
-unsigned long aliveRecievedTimerStart;
-const unsigned long period = 300000;  //5 Mins
+// Timer Variables
+unsigned long timerStartTime;  
+unsigned long currentTimeInMs;
+bool awaitingConfirmation = false;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 
 void setup() {
-  aliveSentTimerStart = millis();  //initial start time
-  aliveRecievedTimerStart = millis();  //initial start time
   pinMode(red_light_pin, OUTPUT);
   pinMode(green_light_pin, OUTPUT);
   pinMode(blue_light_pin, OUTPUT);
@@ -105,53 +110,72 @@ void callback(char* topic, byte* payload, unsigned int length) {
   message[length] = '\0';
   Serial.println(message);
  
+  //////////////////////////////////// TEST COMMANDS
   // Set All LEDs to full brightness
-  if(strcmp(message, "full") == 0)
-  {
+  if(strcmp(message, "full") == 0) {
     RGB_color(1023, 1023, 1023);
     Serial.println("Setting White");
   }
   // Set all LEDs off
-  if(strcmp(message, "off") == 0)
-  {
+  if(strcmp(message, "off") == 0) {
     RGB_color(0, 0, 0);
     Serial.println("Setting all to 0");
   }
   //Test Green Status Flash
-  if(strcmp(message, "testgreenflash") == 0)
-  {
+  if(strcmp(message, "testgreenflash") == 0) {
     Serial.println("Testing Green Flash...");
     statusFlash(2,10);
     Serial.println("Done");
   }
   //Test Red Flash
-  if(strcmp(message, "testredflash") == 0)
-  {
+  if(strcmp(message, "testredflash") == 0) {
     Serial.println("Testing Red Flash...");
     statusFlash(1,10);
     Serial.println("Done");
   }
-  // Test Pink Fade
-  if(strcmp(message, "testpinkfade") == 0)
-  {
-    Serial.println("Testing Pink Fade...");
-    pinkFade();
-    Serial.println("Done");
-  }
   // Check Button Status
-  if(strcmp(message, "chkbtn") == 0)
-  {
+  if(strcmp(message, "chkbtn") == 0) {
     Serial.println("Checking Button Status...");
     checkButtonStatus();
     Serial.println("Done");
   }
-  // Register Partner's Alive Message
-  if(strcmp(message, "alive") == 0)
+  //////////////////////////////////// TEST COMMANDS
+
+  // Acknowledge Partner's Online check
+  if(strcmp(message, "checkifpartneractive") == 0)
   {
-    Serial.println("Setting Alive");
-    aliveRecievedTimerStart = millis();
+    Serial.println("Online Check Recieved - Acknowledging");
+    sendPartnerState(11);
+    Serial.println("Rodger Dodger");
+  }
+
+  // If Partner requests that the light flash pink
+  if(strcmp(message, "beginpartnerlight") == 0) 
+  {
+    Serial.println("Partner Button Triggered. Starting Pink Fade...");
+    pinkFade(); // Fade LEDs
+    Serial.println("Pink Fade Done - Updating Partner");
+    sendPartnerState(12); // On successful fade, notify partner the lights have worked ("lightsuccess")
     Serial.println("Done");
   }
+
+  // Let partner know you are online after it's button is pressed
+  if(strcmp(message, "partnerready") == 0)
+  {
+    Serial.println("Rodger Recieved - Partner Online");
+    awaitingConfirmation = false;
+    sendPartnerState(1);
+  }
+
+  // If Partner has successfully displayed pink
+  if(strcmp(message, "lightsuccess") == 0) 
+  {
+    Serial.println("Partner Lights Successful. Starting Pink Fade...");
+    awaitingConfirmation = false;
+    pinkFade(); // Fade LEDs
+    Serial.println("Pink Fade Done");
+  }
+
   sendState(redcolour, greencolour, bluecolour);
 }
 
@@ -174,22 +198,30 @@ void sendState(int red, int green, int blue) {
 
 // Update current state of Partner Lamp
 void sendPartnerState(int lightCode) {
-  // If partnerAlive() sends 0 (Alive) code
+  // Send Code 0 to check if partner is online
   if (lightCode == 0)
   {
-    client.publish(light_partner_topic, "alive");
+    client.publish(light_partner_topic, "checkifpartneractive");
+    timerStartTime = millis();
+    awaitingConfirmation = true;
   }
-  // If buttonPush() sends 0 (Fade Pink) code
+  // If partner confirmed online, send request to fade pink
   if (lightCode == 1)
   {
-    client.publish(light_partner_topic, "pink");
+    client.publish(light_partner_topic, "beginpartnerlight");
+    timerStartTime = millis();
+    awaitingConfirmation = true;
   }
-  // If some other fuckery sends some wacky code
-  else
+  // If partner requests online status reply rodger
+  if (lightCode == 11)
   {
-    client.publish(light_partner_topic, "invalid-light-code");
+    client.publish(light_partner_topic, "partnerready");
   }
-  
+  // If lights have successfully lit, update partner
+  if (lightCode == 12)
+  {
+    client.publish(light_partner_topic, "lightsuccess");
+  }
 }
 
 // Flash LEDs to indicate system status
@@ -241,24 +273,6 @@ void statusFlash(int colour, int flashes)
   }
 }
 
-// Update partner on current system state & check partner's state
-void partnerAlive(){
-  currentMillis = millis(); // Update timer's current time
-  //Send Alive Message if period > 5
-  if (currentMillis - aliveSentTimerStart >= period)  //If the current time - start time is greater than the defined period
-  {
-    sendPartnerState(0) // Let partner know system is still up
-    aliveSentTimerStart = millis();  //get the current no of ms since program start
-  }
-
-  // Enter Error Light State if partner has not been seen in 5 mins
-  if (currentMillis - aliveRecievedTimerStart >= period)  //If the current time - start time is greater than the defined period
-  {
-    statusFlash(3, 2) // Flash amber to indicate partner disconnect
-    aliveRecievedTimerStart = millis();  //Update start time to start a new timer
-  }
-}
-
 // Reconnect if connection lost
 void reconnect() {
   // Loop until we're reconnected
@@ -268,7 +282,6 @@ void reconnect() {
     // Attempt to connect
     if (client.connect(client_id, mqtt_username, mqtt_password)) {
       Serial.println("connected");
-      statusFlash(2,1);
       client.subscribe(light_set_topic);
     } else {
       statusFlash(1,1);
@@ -312,9 +325,55 @@ void pinkFade()
   Serial.println("Pink Fade complete");
 }
 
+// Blue LED fade used if partner offline
+void blueFade()
+{
+  // fade up to pink
+  for (size_t i = 0; i < 1020; i=i+5)
+  {
+    RGB_color(0, i/4, i);
+  }
+  delay(200);
+  //fade to 500
+    for (size_t i = 1020; i > 300; i=i-5)
+  {
+    RGB_color(0, i/4, i);
+  }
+  delay(100);
+  // fade up to pink
+  for (size_t i = 500; i < 1020; i=i+5)
+  {
+    RGB_color(0, i/4, i);
+  }
+  delay(4000);
+  //fade to 0
+    for (size_t i = 1020; i > 0; i=i-2)
+  {
+    RGB_color(0, i/4, i);
+  }
+  RGB_color(0, 0, 0);
+  Serial.println("Blue Fade complete");
+}
+
+
+// Check if response recieved 
+void fadeConfirmation(){
+  if (awaitingConfirmation == true)
+  {
+    currentTimeInMs = millis(); // Update timer's current time
+    //Send Alive Message if period > 10
+    if (currentTimeInMs - timerStartTime >= 10000)  //If the current time - start time is greater than the defined period
+    {
+      blueFade(); // Let partner know system is still up
+      awaitingConfirmation = false;
+    }
+  }
+}
+
 // Set LEDs to a defined colour
 void RGB_color(int red_light_value, int green_light_value, int blue_light_value)
  {
+  /*
   Serial.println("Setting LEDs:");
   Serial.print("r: ");
   Serial.print(red_light_value);
@@ -322,12 +381,14 @@ void RGB_color(int red_light_value, int green_light_value, int blue_light_value)
   Serial.print(green_light_value);
   Serial.print(", b: ");
   Serial.println(blue_light_value);
+  */
   analogWrite(red_light_pin, red_light_value);
   analogWrite(green_light_pin, green_light_value);
   analogWrite(blue_light_pin, blue_light_value);
   redcolour = red_light_value;
   greencolour = green_light_value;
   bluecolour = blue_light_value;
+  delay(10);
 }
 
 // Output current button status
@@ -342,10 +403,9 @@ void buttonPush() {
   if(digitalRead(button_pin_a) == HIGH) {
     Serial.println("Button A:");
     Serial.println(digitalRead(button_pin_a));
-    Serial.println("Button Pushed. Starting Pink Fade...");
-    pinkFade();
-    Serial.println("Fade Done. Sending Partner State (Code 1)");
-    sendPartnerState(1);
+
+    Serial.println("Sending Partner State Code 0 - Check if Partner is Online");
+    sendPartnerState(0);
     Serial.println("Done.");
     delay(50);
   }
@@ -354,7 +414,7 @@ void buttonPush() {
 // Main program loop
 void loop() {
   buttonPush();
-  partnerAlive()
+  fadeConfirmation();
   if (!client.connected()) {
     reconnect();
   }
